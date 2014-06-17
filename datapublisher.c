@@ -59,6 +59,8 @@ int init_lcc(LCC **lccs, int *lccs_len)
 
 int main(int argc, char* argv[])
 {
+	char dp_station_nr[8 + 1] = "";
+	
 	LCC *lccs = NULL;
 	int lccs_len = 0;
 	
@@ -69,12 +71,23 @@ int main(int argc, char* argv[])
 	
 	int msg_id = 0;
 	int msg_rc = 0;
-	struct msqid_ds	msg_queue;
 	
-	if (init_lcc(&lccs, &lccs_len) != 0) {
+	//char tmpstr[32+1] = "";
+	//struct msqid_ds	msg_queue;
+	
+	// get station number
+	if (readconf(CFG_FILE_PATH, "stationnr", dp_station_nr, 0) == 0) {
+		fprintf(stderr, "datapublisher: error: main: readconf: could not gain station number\n");
 		exit(EXIT_FAILURE);
 	}
 	
+	// initialize LCCs
+	if (init_lcc(&lccs, &lccs_len) != 0) {
+		fprintf(stderr, "datapublisher: error: main: init_lcc: could not initiate LCCs\n");
+		exit(EXIT_FAILURE);
+	}
+	
+	// initialize message queue
 	msg_id = msgget(10021, IPC_CREAT | 0666);
 	if (msg_id < 0) {
 		fprintf(stderr, "datapublisher: error: msgget: ");
@@ -95,9 +108,16 @@ int main(int argc, char* argv[])
 			perror(NULL);
 		}
 		else {
-			printf("rcv: %s %s %s %s\n", dataMsg.date, dataMsg.type, dataMsg.origin, dataMsg.value);
-			mqtt_client_send(lccs[0], "9960/9960/doserate", dataMsg.value);
-			usleep(1000000L);
+			char payload[256 + 1] = "";
+			char topic[64 + 1] = "";
+			
+			//printf("rcv: %s %s %s %s\n", dataMsg.date, dataMsg.type, dataMsg.origin, dataMsg.value);
+			
+			sprintf(payload, "{\"date\": \"%s\", \"value\": %s}", dataMsg.date, dataMsg.value);
+			sprintf(topic, "%s/%s/doserate", dp_station_nr, dataMsg.origin + 18);
+			
+			mqtt_client_send(lccs[0], topic, payload);
+			//usleep(1000000L);
 		}
 	}
 	
