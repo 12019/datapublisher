@@ -1,99 +1,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <linux/inotify.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
 
 #include "datapublisher.h"
-#include "lib/libpaho-mqtt3/MQTTAsync.h"
+
 #include "../gp_functions.h"
-
-#define ADDRESS     "tcp://10.0.0.57:1883"
-#define CLIENTID    "ExampleClientPub"
-#define TOPIC       "Buoy_1/NaI/status"
-#define PAYLOAD     "0"
-#define QOS         1
-#define TIMEOUT     10000L
-
-volatile MQTTAsync_token deliveredtoken; 
-
-int finished = 0;
-
-void connlost(void *context, char *cause)
-{
-	MQTTAsync client = (MQTTAsync)context;
-	MQTTAsync_connectOptions conn_opts = MQTTAsync_connectOptions_initializer;
-	int rc;
-
-	printf("\nConnection lost\n");
-	printf("     cause: %s\n", cause);
-
-	printf("Reconnecting\n");
-	conn_opts.keepAliveInterval = 20;
-	conn_opts.cleansession = 1;
-	if ((rc = MQTTAsync_connect(client, &conn_opts)) != MQTTASYNC_SUCCESS)
-	{
-		printf("Failed to start connect, return code %d\n", rc);
- 		finished = 1;
-	}
-}
-
-
-void onDisconnect(void* context, MQTTAsync_successData* response)
-{
-	printf("Successful disconnection\n");
-	finished = 1;
-}
-
-
-void onSend(void* context, MQTTAsync_successData* response)
-{
-	MQTTAsync client = (MQTTAsync)context;
-	MQTTAsync_disconnectOptions opts = MQTTAsync_disconnectOptions_initializer;
-	int rc;
-
-	printf("Message with token value %d delivery confirmed\n", response->token);
-
-	opts.onSuccess = onDisconnect;
-	opts.context = client;
-
-	if ((rc = MQTTAsync_disconnect(client, &opts)) != MQTTASYNC_SUCCESS)
-	{
-		printf("Failed to start sendMessage, return code %d\n", rc);
-		exit(-1);	
-	}
-}
-
-
-void onConnectFailure(void* context, MQTTAsync_failureData* response)
-{
-	printf("Connect failed, rc %d\n", response ? response->code : 0);
-	finished = 1;
-}
-
-
-void onConnect(void* context, MQTTAsync_successData* response)
-{
-	MQTTAsync client = (MQTTAsync)context;
-	MQTTAsync_responseOptions opts = MQTTAsync_responseOptions_initializer;
-	MQTTAsync_message pubmsg = MQTTAsync_message_initializer;
-	int rc;
-
-	printf("Successful connection\n");
-	
-	opts.onSuccess = onSend;
-	opts.context = client;
-
-	pubmsg.payload = PAYLOAD;
-	pubmsg.payloadlen = strlen(PAYLOAD);
-	pubmsg.qos = QOS;
-	pubmsg.retained = 0;
-	deliveredtoken = 0;
-
-	if ((rc = MQTTAsync_sendMessage(client, TOPIC, &pubmsg, &opts)) != MQTTASYNC_SUCCESS)
-	{
-		printf("Failed to start sendMessage, return code %d\n", rc);
- 		exit(-1);	
-	}
-}
+#include "../msg_queue.h"
 
 int init_lcc(LCC **lccs, int *lccs_len)
 {
@@ -147,43 +62,79 @@ int main(int argc, char* argv[])
 	LCC *lccs = NULL;
 	int lccs_len = 0;
 	
-	MQTTAsync client;
-	MQTTAsync_connectOptions conn_opts = MQTTAsync_connectOptions_initializer;
-	MQTTAsync_message pubmsg = MQTTAsync_message_initializer;
-	MQTTAsync_token token;
-	int rc;
+	/*int in_fd = 0;
+	int in_wd = 0;
+	int in_len = 0;
+	char in_buffer[INOTIFY_EVENT_BUF_LEN];*/
+	
+	int msg_id = 0;
+	int msg_rc = 0;
+	struct msqid_ds	msg_queue;
 	
 	if (init_lcc(&lccs, &lccs_len) != 0) {
 		exit(EXIT_FAILURE);
 	}
 	
-	//fprintf(stderr, "%s\n", lccs[1].address);
-	
-	MQTTAsync_create(&client, ADDRESS, CLIENTID, MQTTCLIENT_PERSISTENCE_NONE, NULL);
-
-	MQTTAsync_setCallbacks(client, NULL, connlost, NULL, NULL);
-
-	conn_opts.keepAliveInterval = 20;
-	conn_opts.cleansession = 1;
-	conn_opts.onSuccess = onConnect;
-	conn_opts.onFailure = onConnectFailure;
-	conn_opts.context = client;
-	if ((rc = MQTTAsync_connect(client, &conn_opts)) != MQTTASYNC_SUCCESS)
-	{
-		printf("Failed to start connect, return code %d\n", rc);
-		exit(-1);	
+	msg_id = msgget(10021, IPC_CREAT | 0666);
+	if (msg_id < 0) {
+		fprintf(stderr, "datapublisher: error: msgget: ");
+		perror(NULL);
 	}
+	
+	/*msgctl(msg_id, IPC_STAT, &msg_queue);
+	while(msg_queue.msg_qnum == 0) {
+		msgctl(msg_id, IPC_STAT, &msg_queue);
+		usleep(100000L);
+	}
+	fprintf(stderr, "%d\n", msg_queue.msg_qnum);*/
+	
+	while (1) {
+		msg_rc = msgrcv(msg_id, &dataMsg, sizeof(MsgType), 0, 0);
+		if (msg_rc < 0) {
+			fprintf(stderr, "datapublisher: error: msgrcv: ");
+			perror(NULL);
+		}
+		else {
+			printf("rcv: %s %s %s %s\n", dataMsg.date, dataMsg.type, dataMsg.origin, dataMsg.value);
+			mqtt_client_send(lccs[0], "9960/9960/doserate", dataMsg.value);
+			usleep(1000000L);
+		}
+	}
+	
+	/*in_fd = inotify_init();
+	if (in_fd < 0) {
+		fprintf(stderr, "datapublisher: error: inotify_init: ");
+		perror(NULL);
+	}
+	
+	in_wd = inotify_add_watch(in_fd, "/usbstick/datatxt/DET/monthly", IN_CLOSE_WRITE);
+	if (in_wd < 0) {
+		fprintf(stderr, "datapublisher: error: inotify_add_watch: ");
+		perror(NULL);
+	}
+	
+	in_len = read(in_fd, in_buffer, INOTIFY_EVENT_BUF_LEN);
+	if (in_len < 0) {
+		fprintf(stderr, "datapublisher: error: read: ");
+		perror(NULL);
+	}
+	else {
+		int i = 0;
+		while (i < in_len) {
+			struct inotify_event *event = (struct inotify_event*) &in_buffer[i];     
+			if (event->len) {
+				if (event->mask & IN_CLOSE_WRITE) {
+					if (strcmp(event->name + 7, "1min.csv") == 0) {
+						printf("file %s has been written and closed.\n", event->name);
+					}
+				}
+			}
+			i += INOTIFY_EVENT_SIZE + event->len;
+		}
+	}*/
+	
+	
 
-	printf("Waiting for publication of %s\n"
-         "on topic %s for client with ClientID: %s\n",
-         PAYLOAD, TOPIC, CLIENTID);
-	while (!finished)
-		#if defined(WIN32)
-			Sleep(100);
-		#else
-			usleep(10000L);
-		#endif
-
-	MQTTAsync_destroy(&client);
- 	return rc;
+	//MQTTAsync_destroy(&client);
+ 	return 0;
 }
